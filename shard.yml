@@ -1,0 +1,13 @@
+name: cached_static_server
+version: 0.1.0
+
+authors:
+  - D. Scott Boggs <scott@tams.tech>
+
+targets:
+  cached_static_server:
+    main: src/cached_static_server.cr
+
+crystal: 0.32.1
+
+license: MIT
