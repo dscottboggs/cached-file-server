@@ -15,7 +15,7 @@ server = HTTP::Server.new do |context|
   end
 end
 
-addr = server.bind_tcp config.port.to_i
+addr = server.bind_tcp config.bind_address, config.port.to_i
 puts "Serving files under #{config.parent_dir} at #{addr}"
 
 server.listen
