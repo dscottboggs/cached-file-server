@@ -6,7 +6,7 @@ authors:
 
 targets:
   cached_static_server:
-    main: src/cached_static_server.cr
+    main: src/run.cr
 
 crystal: 0.32.1
 

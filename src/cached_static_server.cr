@@ -15,7 +15,7 @@ module CachedStaticServer
 
     property parent_dir : Path
     property port : UInt16
-    property cache = {} of String => String
+    property cache = {} of Path => String
     property bind_address : String
     property not_found_action : Proc(HTTP::Request, String) = ->default_not_found_action(HTTP::Request)
 
@@ -28,14 +28,17 @@ module CachedStaticServer
     private def read_files_into_cache(dir : Path = @parent_dir)
       debug "scanning dir #{dir}"
       Dir.each_child dir.to_s do |file|
-        next read_files_into_cache(dir / file) if File.directory? dir / file
-        debug "caching file #{dir / file}"
-        cache[(dir / file).to_s] = File.read dir / file
+        fullpath = dir / file
+        next read_files_into_cache fullpath if File.directory? fullpath
+        debug "caching file #{fullpath}"
+        cache[fullpath] = File.read fullpath
       end
     end
 
     def serve(request : HTTP::Request)
-      if cached = cache[(parent_dir / request.path).to_s]?
+      if cached = cache[parent_dir / request.path]?
+        {200, cached}
+      elsif cached = cache[parent_dir / request.path / "index.html"]?
         {200, cached}
       else
         {404, @not_found_action.call(request)}
@@ -48,8 +51,12 @@ module CachedStaticServer
   end
 
   class CLI
+    def self.default_port : UInt16
+      (ENV["port"]? || 12345).to_u16
+    end
+
     def self.build_server(args = ARGV)
-      port, parent, addr = 12345, Dir.current, "0.0.0.0"
+      port, parent, addr = default_port, Dir.current, "0.0.0.0"
       template = nil
       OptionParser.parse args do |parser|
         parser.banner = "Cached Static File Server"
@@ -80,6 +87,7 @@ module CachedStaticServer
       #     ECR.render template
       #   end
       # end
+      pp! parent, port, addr
       server
     end
   end
