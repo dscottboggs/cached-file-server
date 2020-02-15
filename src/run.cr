@@ -8,7 +8,13 @@ server = HTTP::Server.new do |context|
   begin
     code, resp = config.serve context.request
     context.response.status_code = code
-    resp.to_s context.response
+    if resp.is_a? String
+      resp.to_s context.response
+    elsif resp.is_a? Bytes
+      context.response.write resp
+    else
+      raise "received invalid response #{resp.inspect} with status #{code}"
+    end
   rescue e
     context.response.status = HTTP::Status::INTERNAL_SERVER_ERROR
     context.response.puts e.message

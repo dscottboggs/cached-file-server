@@ -15,7 +15,7 @@ module CachedStaticServer
 
     property parent_dir : Path
     property port : UInt16
-    property cache = {} of Path => String
+    property cache = {} of Path => Bytes
     property bind_address : String
     property not_found_action : Proc(HTTP::Request, String) = ->default_not_found_action(HTTP::Request)
 
@@ -31,7 +31,17 @@ module CachedStaticServer
         fullpath = dir / file
         next read_files_into_cache fullpath if File.directory? fullpath
         debug "caching file #{fullpath}"
-        cache[fullpath] = File.read fullpath
+        File.open fullpath do |file|
+          size = file.info.size
+          buf = Bytes.new LibC.malloc(size).as(Pointer(UInt8)), size
+          #  uninitialized, forever-living (no GC) pointer.
+          #  these need to be kept around for the life of the
+          #  program anyway, and we're about to fill
+          #  in the buffer, so why bother zeroing it?
+          read_count = file.read buf
+          raise "read #{read_count} bytes from file #{fullpath} of size #{size}" if read_count != size
+          cache[fullpath] = buf
+        end
       end
     end
 
