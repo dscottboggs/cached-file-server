@@ -1,4 +1,7 @@
 require "./log"
+require "inotify"
+require "./manual_memory_management"
+require "./cli"
 
 module CachedStaticServer
   TEMPLATE_USAGE = "\
@@ -8,6 +11,7 @@ module CachedStaticServer
 
   class Server
     include Log
+    include ManualMemoryManagement
 
     def self.default_not_found_action(request : HTTP::Request) : String
       "No file found at #{request.path}"
@@ -26,21 +30,110 @@ module CachedStaticServer
     end
 
     private def read_files_into_cache(dir : Path = @parent_dir)
-      debug "scanning dir #{dir}"
+      log "scanning dir %s", dir.to_s
+      raise "tried to scan dir but was file at #{dir}" unless File.directory? path: dir
+      watch_dir path: dir
       Dir.each_child dir.to_s do |file|
         fullpath = dir / file
         next read_files_into_cache fullpath if File.directory? fullpath
-        debug "caching file #{fullpath}"
-        File.open fullpath do |file|
-          size = file.info.size
-          buf = Bytes.new LibC.malloc(size).as(Pointer(UInt8)), size
-          #  uninitialized, forever-living (no GC) pointer.
-          #  these need to be kept around for the life of the
-          #  program anyway, and we're about to fill
-          #  in the buffer, so why bother zeroing it?
-          read_count = file.read buf
-          raise "read #{read_count} bytes from file #{fullpath} of size #{size}" if read_count != size
-          cache[fullpath] = buf
+        read_in_one_file fullpath
+      end
+    end
+
+    private def read_in_one_file(path : Path)
+      log "caching file %s", path.to_s
+      File.open path do |file|
+        debug "file opened at ", path.to_s
+        size = file.info.size
+        buf = malloc size, path
+        debug "buffer allocated"
+        read_count = file.read buf
+        raise "read #{read_count} bytes from file #{path} of size #{size}" if read_count != size
+        debug "file read successfully"
+        cache[path] = buf
+        watch path
+      rescue err
+        LibC.free buf if buf
+        raise err
+      end
+    end
+
+    def watch(path : Path)
+      debug "watching file %s", path.to_s
+      Inotify.watch path.to_s do |event|
+        debug "processing file event at %s", path.to_s
+        case event.type
+        when Inotify::Event::Type::DELETE, Inotify::Event::Type::DELETE_SELF
+          log "delete event for %s received.", path.to_s
+          if buf = cache.delete path
+            debug "freeing buffer at 0x%X", buf.to_unsafe.address
+            LibC.free buf
+          end
+        when Inotify::Event::Type::MODIFY
+          log "modify event for %s received.", path.to_s
+          update_file_at path
+        end
+      end
+    end
+
+    def watch_dir(path : Path)
+      debug "watching directory #{path}"
+      Inotify.watch path.to_s do |event|
+        debug "processing directory event at %s", path.to_s
+        evpath = event.path.try { |p| Path.new p } || path
+        if name = event.name
+          evpath /= name
+        end
+        debug "event path was #{evpath} and type was #{event.type}"
+        case event.type
+        when Inotify::Event::Type::CREATE
+          if File.file? evpath
+            log "caching new file at #{evpath}"
+            update_file_at evpath
+          elsif File.directory? evpath
+            log "caching new directory at #{evpath}"
+            read_files_into_cache evpath
+          end
+        when Inotify::Event::Type::DELETE
+          if buf = cache.delete evpath
+            debug "freeing buffer for #{evpath} at #{addr of: buf}"
+            LibC.free buf
+          end
+        when Inotify::Event::Type::DELETE_SELF
+          # delete any file under this path
+          cache.reject! do |cache_path, buf|
+            next unless cache_path > path
+            log "clearing deleted file under #{path} at #{cache_path} from cache"
+            LibC.free buf
+            true
+          end
+          next
+        else pp! event.type
+        end
+      end
+    end
+
+    def update_file_at(path)
+      debug "file at #{path} was updated"
+      File.open path do |file|
+        debug "opened file at #{path}"
+        size = file.info.size
+        if buf = cache.delete path
+          debug "overwriting existing buffer at #{addr of: buf}"
+          if buf.size == size
+            debug "same size, no need to reallocate"
+            file.read buf
+          else
+            debug "reallocating buffer for file at #{path} from #{buf.size} to #{size} at #{addr of: buf}"
+            buf = realloc buf, size
+            debug "buffer is now at #{addr of: buf} through 0x#{(buf.to_unsafe.address + size).to_s base: 16}"
+            file.read buf
+          end
+          cache[path] = buf
+          log "updated cache for file at #{path}"
+        else
+          debug "file at #{path} not found in cache, reading in fresh."
+          read_in_one_file path
         end
       end
     end
@@ -57,48 +150,6 @@ module CachedStaticServer
 
     def on_not_found(&action : Proc(HTTP::Request, String))
       @not_found_action = action
-    end
-  end
-
-  class CLI
-    def self.default_port : UInt16
-      (ENV["port"]? || 12345).to_u16
-    end
-
-    def self.build_server(args = ARGV)
-      port, parent, addr = default_port, Dir.current, "0.0.0.0"
-      template = nil
-      OptionParser.parse args do |parser|
-        parser.banner = "Cached Static File Server"
-        parser.on "-h", "--help", "Show this help" do
-          puts parser
-          exit 0
-        end
-        parser.on "-p PORT",
-          "--port PORT",
-          "bind the server to a port. Defaults to 12345" do |p|
-          port = p.to_u16
-        end
-        parser.on "-d DIR",
-          "--parent DIR",
-          "specify the parent directory under which files will be served." do |dir|
-          parent = dir
-        end
-        parser.on "-a ADDR", "--address ADDR", "bind to a given interface address" do |a|
-          addr = a
-        end
-        # parser.on "-t TEMPLATE", "--on-not-found TEMPLATE", TEMPLATE_USAGE do |file|
-        #   template = file
-        # end
-      end
-      server = Server.new parent, port, addr
-      # if template
-      #   server.on_not_found do |request|
-      #     ECR.render template
-      #   end
-      # end
-      pp! parent, port, addr
-      server
     end
   end
 end

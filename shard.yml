@@ -11,3 +11,8 @@ targets:
 crystal: 0.32.1
 
 license: MIT
+
+dependencies:
+  inotify:
+    github: petoem/inotify.cr
+    version: 1.0.1
